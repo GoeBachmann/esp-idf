@@ -12,100 +12,79 @@
    CONDITIONS OF ANY KIND, either express or implied.
 */
 #include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_task_info.h"
 #include "esp_heap_caps.h"
-#include "esp_random.h"
-#include "esp_log.h"
 
-static void no_leak_task(void *args)
-{
-    size_t size_a = 0;
-    size_t size_b = 0;
-    char *task_name = pcTaskGetName(*((TaskHandle_t*)args));
-    printf("Starting task: %s\n", task_name);
+typedef struct {
+    char * ptr;
+    TaskHandle_t task;
+} allocation_t;
 
-    while(1) {
-        /* Allocate random amount of memory for demonstration */
-        size_a = (esp_random() % 10000) + 1;
-        size_b = (esp_random() % (10000 - size_a)) + 1;
+#define NUM_ALLOCATIONS 500
+static volatile allocation_t allocations[NUM_ALLOCATIONS];
+static volatile bool bug_reproduced = false;
+static volatile bool task_done = false;
 
-        void *ptr_a = heap_caps_malloc(size_a, MALLOC_CAP_DEFAULT);
-        void *ptr_b = heap_caps_malloc(size_b, MALLOC_CAP_DEFAULT);
-        if (ptr_a == NULL || ptr_b == NULL) {
-            ESP_LOGE(task_name, "Could not allocate heap memory");
-            abort();
-        }
-
-        heap_caps_free(ptr_a);
-        heap_caps_free(ptr_b);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+static void realloc_then_free(void * ptr, size_t size) {
+    void * new_ptr = realloc(ptr, size);
+    if (new_ptr != NULL) ptr = new_ptr;
+    free(ptr);
 }
 
-static void leaking_task(void *args)
+static void alloc_task(void *args)
 {
-    size_t size_a = 0;
-    size_t size_b = 0;
-    char *task_name = pcTaskGetName(*((TaskHandle_t*)args));
-    printf("Starting task: %s\n", task_name);
+    TaskHandle_t handle = xTaskGetCurrentTaskHandle();
 
-    while(1) {
-        /* Allocate random amount of memory for demonstration */
-        size_a = (esp_random() % 10000) + 1;
-        size_b = (esp_random() % (10000 - size_a)) + 1;
+    size_t i = (size_t)args;
+    allocations[i].ptr = heap_caps_malloc(10, MALLOC_CAP_DEFAULT);
+    allocations[i].task = handle;
 
-        void *ptr_a = heap_caps_malloc(size_a, MALLOC_CAP_DEFAULT);
-        void *ptr_b = heap_caps_malloc(size_b, MALLOC_CAP_DEFAULT);
-        if (ptr_a == NULL || ptr_b == NULL) {
-            ESP_LOGE(task_name, "Could not allocate heap memory");
-            abort();
+    char *task_name = pcTaskGetName(handle);
+    printf("Starting task: %s %d (ptr = %p)\n", task_name, i, handle);
+
+    for (int j = 0; j < i; j++) {
+        if (allocations[j].task == handle) {
+            printf("Found task with same handle allocations[%d].task == allocations[%d].task\n", i, j);
+
+            // trigger bug
+            realloc_then_free(allocations[i].ptr, 20);
+            realloc_then_free(allocations[j].ptr, 20);
+            // heap usage now at -10 bytes for both tasks
+            allocations[i].ptr = NULL;
+            allocations[j].ptr = NULL;
+
+            // mark done
+            bug_reproduced = true;
+            task_done = true;
+
+            while (1) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
         }
-
-        heap_caps_free(ptr_a);
-        // heap_caps_free(ptr_b);
-        vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+    // mark done
+    task_done = true;
+    vTaskDelete(NULL);
 }
+
+static void dummy_task(void *args) { while (1) taskYIELD(); }
 
 void app_main(void)
 {
-    TaskHandle_t no_leak_task_hdl, leaking_task_hdl;
+    xTaskCreate(&dummy_task, "dummy_task", 3072, NULL, 0, NULL);
 
-    /* Create example task to demonstrate heap_task_tracking */
-    xTaskCreate(&no_leak_task, "no_leak_task", 3072, &no_leak_task_hdl, 5, &no_leak_task_hdl);
-    xTaskCreate(&leaking_task, "leaking_task", 3072, &leaking_task_hdl, 5, &leaking_task_hdl);
+    for (int i = 0; i < NUM_ALLOCATIONS; i++) {
+        // run alloc task
+        task_done = false;
+        xTaskCreate(&alloc_task, "alloc_task", 3072, (void*)i, 5, NULL);
+        while (!task_done) vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* print task statistic periodically */
-    for(size_t counter = 0; counter < 4; counter++) {
-        /* print the overview stats of every task */
-        printf("\n PRINTING OVERVIEW STATISTICS OF EACH TASK\n");
-        heap_caps_print_all_task_stat_overview(stdout);
-
-        /* print the overview statistics of the no leak task */
-        printf("\n PRINTING OVERVIEW STATISTICS OF NO LEAK TASK\n");
-        heap_caps_print_single_task_stat_overview(stdout, no_leak_task_hdl);
-
-        /* print the overview statistics of the leaking task */
-        printf("\n PRINTING OVERVIEW STATISTICS OF LEAKING TASK\n");
-        heap_caps_print_single_task_stat_overview(stdout, leaking_task_hdl);
-
-        if (counter == 2) {
-            /* delete the leaking task and let the no leak task run
-             * for some more time */
-            printf("Deleting task: %s\n", pcTaskGetName(leaking_task_hdl));
-            vTaskDelete(leaking_task_hdl);
-        }
-
-        /* wait for a second before running the loop again*/
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (bug_reproduced) break;
     }
-
-    /* Delete the no leak task */
-    printf("Deleting task: %s\n", pcTaskGetName(no_leak_task_hdl));
-    vTaskDelete(no_leak_task_hdl);
+    if (!bug_reproduced) return;
 
     /* print overview information of every task */
     printf("\n PRINTING OVERVIEW STATISTICS OF EACH TASK\n");
