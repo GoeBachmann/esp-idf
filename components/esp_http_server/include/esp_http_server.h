@@ -1008,6 +1008,33 @@ size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field);
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size);
 
 /**
+ * @brief   Get the value string of a field from the request headers
+ *
+ * @note
+ *  - This API is meant to be used with std::string_view or similar
+ *  - This API is supposed to be called only from the context of
+ *    a URI handler where httpd_req_t* request pointer is valid.
+ *  - Once httpd_resp_send() API is called all request headers
+ *    are purged, so request headers need be copied into separate
+ *    buffers if they are required later.
+ *  - If output size is greater than input, then the value is truncated,
+ *    accompanied by truncation error as return value.
+ *  - Use httpd_req_get_hdr_value_len() to know the right buffer length
+ *
+ * @param[in]  r        The request being responded to
+ * @param[in]  field    The field to be searched in the header
+ * @param[out] val      Pointer to a pointer that should be updated to the begin of the buffer
+ * @param[in]  val_size Pointer to the length of the output buffer
+ *
+ * @return
+ *  - ESP_OK : Field found in the request header and value string copied
+ *  - ESP_ERR_NOT_FOUND          : Key not found
+ *  - ESP_ERR_INVALID_ARG        : Null arguments
+ *  - ESP_ERR_HTTPD_INVALID_REQ  : Invalid HTTP request pointer
+ */
+esp_err_t httpd_req_get_hdr_value_str_ptr(httpd_req_t *r, const char *field, char **val, size_t *val_size);
+
+/**
  * @brief   Get Query string length from the request URL
  *
  * @note    This API is supposed to be called only from the context of

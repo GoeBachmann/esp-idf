@@ -1134,6 +1134,65 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *v
     return ESP_ERR_NOT_FOUND;
 }
 
+/* Get the value of a field from the request headers */
+esp_err_t httpd_req_get_hdr_value_str_ptr(httpd_req_t *r, const char *field, char **val, size_t *val_size)
+{
+    if (r == NULL || field == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!httpd_valid_req(r)) {
+        return ESP_ERR_HTTPD_INVALID_REQ;
+    }
+
+    struct httpd_req_aux *ra = r->aux;
+    const char   *hdr_ptr = ra->scratch;         /*!< Request headers are kept in scratch buffer */
+    unsigned     count    = ra->req_hdrs_count;  /*!< Count set during parsing  */
+
+    while (count--) {
+        /* Search for the ':' character. Else, it would mean
+         * that the field is invalid
+         */
+        const char *val_ptr = strchr(hdr_ptr, ':');
+        if (!val_ptr) {
+            break;
+        }
+
+        /* If the field, does not match, continue searching.
+         * Compare lengths first as field from header is not
+         * null terminated (has ':' in the end).
+         */
+        if ((val_ptr - hdr_ptr != strlen(field)) ||
+            (strncasecmp(hdr_ptr, field, strlen(field)))) {
+            if (count) {
+                /* Jump to end of header field-value string */
+                hdr_ptr = 1 + strchr(hdr_ptr, '\0');
+
+                /* Skip all null characters (with which the line
+                 * terminators had been overwritten) */
+                while (*hdr_ptr == '\0') {
+                    hdr_ptr++;
+                }
+            }
+            continue;
+        }
+
+        /* Skip ':' */
+        val_ptr++;
+
+        /* Skip preceding space */
+        while ((*val_ptr != '\0') && (*val_ptr == ' ')) {
+            val_ptr++;
+        }
+
+        /* Copy the string pointer */
+        *val = val_ptr;
+        *val_size = strlen(val_ptr);
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
 /* Helper function to get a cookie value from a cookie string of the type "cookie1=val1; cookie2=val2" */
 esp_err_t static httpd_cookie_key_value(const char *cookie_str, const char *key, char *val, size_t *val_size)
 {
