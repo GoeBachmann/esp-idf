@@ -254,11 +254,11 @@ static HEAP_IRAM_ATTR task_info_t * find_or_create_new_task_stats_entry(void * b
  */
 static HEAP_IRAM_ATTR task_info_t * find_task_stats_entry_for_block(heap_caps_block_owner_t block_owner)
 {
-#if CONFIG_HEAP_TRACK_DELETED_TASKS
+#if CONFIG_HEAP_TRACK_DELETED_TASKS && CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
     // if we track deleted tasks, then the task_info pointer of the block
     // is guaranteed to be still valid
     return (task_info_t *)block_owner.task_info;
-#else // !CONFIG_HEAP_TRACK_DELETED_TASKS
+#else // !(CONFIG_HEAP_TRACK_DELETED_TASKS && CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS)
     // if we don't track deleted_tasks, then we could have deleted this task's
     // task_info pointer already
     //
@@ -272,10 +272,10 @@ static HEAP_IRAM_ATTR task_info_t * find_task_stats_entry_for_block(heap_caps_bl
     }
 
     return NULL;
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
+#endif // !(CONFIG_HEAP_TRACK_DELETED_TASKS || CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS)
 }
 
-#if !CONFIG_HEAP_TRACK_DELETED_TASKS
+#if !CONFIG_HEAP_TRACK_DELETED_TASKS || !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
 /**
  * @brief Delete an entry from the list of task statistics
  *
@@ -393,7 +393,7 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
     task_info_t * old_task_info = find_task_stats_entry_for_block(old_block_owner);
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
     alloc_stats_t *alloc_stat = NULL;
-#endif
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
     if (old_task_info != NULL) {
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -469,6 +469,12 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
             create_new_heap_stats_entry(heap, new_task_info, new_ptr, new_size, caps);
         }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+
+#if  !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+        if (!old_task_info->task_stat.is_alive && old_task_info->task_stat.overall_current_usage == 0) {
+            delete_task_info_entry(old_task_info);
+        }
+#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
     }
 
     xSemaphoreGive(s_task_tracking_mutex);
@@ -482,10 +488,6 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
     heap_caps_block_owner_t block_owner = MULTI_HEAP_GET_BLOCK_OWNER(block_owner_ptr);
     size_t size = multi_heap_get_full_block_size(heap->heap, block_owner_ptr);
     task_info_t * task_info = find_task_stats_entry_for_block(block_owner);
-
-#if !CONFIG_HEAP_TRACK_DELETED_TASKS
-    task_info_t *task_info_to_delete = NULL;
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
 
     if (task_info != NULL) {
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -540,17 +542,16 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
             // we found the task info from the task that is being deleted.
             task_info->task_stat.is_alive = false;
 #if !CONFIG_HEAP_TRACK_DELETED_TASKS
-            task_info_to_delete = task_info;
+            delete_task_info_entry(task_info);
 #endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
         }
-    }
 
-#if !CONFIG_HEAP_TRACK_DELETED_TASKS
-    // remove the entry related to the task that was just deleted.
-    if (task_info_to_delete != NULL) {
-        delete_task_info_entry(task_info_to_delete);
+#if !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+        if (!task_info->task_stat.is_alive && task_info->task_stat.overall_current_usage == 0) {
+            delete_task_info_entry(task_info);
+        }
+#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
     }
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
 
     xSemaphoreGive(s_task_tracking_mutex);
 }
