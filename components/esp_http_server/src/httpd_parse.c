@@ -1072,66 +1072,20 @@ size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field)
 /* Get the value of a field from the request headers */
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size)
 {
-    if (r == NULL || field == NULL) {
-        return ESP_ERR_INVALID_ARG;
+    char * val_ptr = NULL;
+    size_t val_full_size = 0;
+
+    esp_err_t err = httpd_req_get_hdr_value_str_ptr(r, field, &val_ptr, &val_full_size);
+    if (err != ESP_OK) {
+        return err;
     }
 
-    if (!httpd_valid_req(r)) {
-        return ESP_ERR_HTTPD_INVALID_REQ;
+    strlcpy(val, val_ptr, val_full_size);
+    if (val_size < val_full_size) {
+        return ESP_ERR_HTTPD_RESULT_TRUNC;
     }
 
-    struct httpd_req_aux *ra = r->aux;
-    const char   *hdr_ptr = ra->scratch;         /*!< Request headers are kept in scratch buffer */
-    unsigned     count    = ra->req_hdrs_count;  /*!< Count set during parsing  */
-
-    while (count--) {
-        /* Search for the ':' character. Else, it would mean
-         * that the field is invalid
-         */
-        const char *val_ptr = strchr(hdr_ptr, ':');
-        if (!val_ptr) {
-            break;
-        }
-
-        /* If the field, does not match, continue searching.
-         * Compare lengths first as field from header is not
-         * null terminated (has ':' in the end).
-         */
-        if ((val_ptr - hdr_ptr != strlen(field)) ||
-            (strncasecmp(hdr_ptr, field, strlen(field)))) {
-            if (count) {
-                /* Jump to end of header field-value string */
-                hdr_ptr = 1 + strchr(hdr_ptr, '\0');
-
-                /* Skip all null characters (with which the line
-                 * terminators had been overwritten) */
-                while (*hdr_ptr == '\0') {
-                    hdr_ptr++;
-                }
-            }
-            continue;
-        }
-
-        /* Skip ':' */
-        val_ptr++;
-
-        /* Skip preceding space */
-        while ((*val_ptr != '\0') && (*val_ptr == ' ')) {
-            val_ptr++;
-        }
-
-        /* Get the NULL terminated value and copy it to the caller's buffer.
-         * Note `strlcpy()` will always return the size of the source string
-         * including terminimating null.*/
-        size_t full_size = strlcpy(val, val_ptr, val_size);
-
-        /* If buffer length is smaller than needed, return truncation error */
-        if (val_size < full_size) {
-            return ESP_ERR_HTTPD_RESULT_TRUNC;
-        }
-        return ESP_OK;
-    }
-    return ESP_ERR_NOT_FOUND;
+    return ESP_OK;
 }
 
 /* Get the value of a field from the request headers */
