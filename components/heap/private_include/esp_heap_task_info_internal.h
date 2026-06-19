@@ -16,6 +16,9 @@ typedef struct heap_t_ heap_t;
 
 typedef struct {
     void * task_info;
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+    const char * subtask;
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 } heap_caps_block_owner_t;
 
 void heap_caps_update_per_task_info_alloc(heap_t *heap, void *ptr, size_t size, uint32_t caps);
