@@ -7,6 +7,8 @@
 
 #ifdef CONFIG_HEAP_TASK_TRACKING
 
+#include "sys/queue.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -14,11 +16,14 @@ extern "C" {
 // forward-declaration
 typedef struct heap_t_ heap_t;
 
-typedef struct {
+typedef struct heap_caps_block_owner {
     void * task_info;
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
     const char * subtask;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
+    STAILQ_ENTRY(heap_caps_block_owner) next_alloc;
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 } heap_caps_block_owner_t;
 
 void heap_caps_update_per_task_info_alloc(heap_t *heap, void *ptr, size_t size, uint32_t caps);
