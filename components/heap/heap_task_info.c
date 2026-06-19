@@ -34,7 +34,12 @@ typedef heap_caps_block_owner_t alloc_stats_t;
  */
 typedef struct heap_stats {
     multi_heap_handle_t heap;
-    heap_stat_t heap_stat;
+    const char *name;
+    size_t size;
+    uint32_t caps;
+    size_t current_usage;
+    size_t peak_usage;
+    size_t alloc_count;
     STAILQ_HEAD(alloc_stats_ll, heap_caps_block_owner) allocs_stats;
     STAILQ_ENTRY(heap_stats) next_heap_stat;
 } heap_stats_t;
@@ -55,14 +60,23 @@ typedef struct subtask_stats {
  * tasks since startup.
  */
 typedef struct task_stats {
-    task_stat_t task_stat;
+    TaskHandle_t handle;
+#ifdef CONFIG_HEAP_TRACK_DELETED_TASKS
+    char name[configMAX_TASK_NAME_LEN];
+#endif // CONFIG_HEAP_TRACK_DELETED_TASKS
+    bool is_alive;
+    size_t overall_peak_usage;
+    size_t overall_current_usage;
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+    size_t subtask_count;
     STAILQ_HEAD(subtask_stats_ll, subtask_stats) subtasks_stats;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+    size_t heap_count;
     STAILQ_HEAD(heap_stats_ll, heap_stats) heaps_stats;
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
     SLIST_ENTRY(task_stats) next_task_info;
 } task_info_t;
-
 
 static SLIST_HEAD(task_stats_ll, task_stats) task_stats = SLIST_HEAD_INITIALIZER(task_stats);
 
@@ -122,6 +136,14 @@ extern void heap_caps_cleanup_user_subtask(const char ** p_subtask) {
 }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
+static void copy_task_name(char * buf, size_t buf_size, TaskHandle_t task_handle) {
+    if (task_handle == NULL) {
+        strncpy(buf, "Pre-scheduler", buf_size);
+    } else {
+        strncpy(buf, pcTaskGetName(task_handle), buf_size);
+    }
+}
+
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 /**
  * @brief Add allocation to linked list
@@ -171,15 +193,14 @@ static HEAP_IRAM_ATTR void create_new_heap_stats_entry(heap_t *used_heap, task_i
     STAILQ_INIT(&heap_stats->allocs_stats);
 
     heap_stats->heap = used_heap->heap;
-    heap_stats->heap_stat.name = used_heap->name;
-    heap_stats->heap_stat.size = used_heap->end - used_heap->start;
-    heap_stats->heap_stat.caps = caps;
-    heap_stats->heap_stat.current_usage = size;
-    heap_stats->heap_stat.peak_usage = size;
-    heap_stats->heap_stat.alloc_count = 1;
-    heap_stats->heap_stat.alloc_stat = NULL; // this will be used to point at the user defined array of alloc_stat
+    heap_stats->name = used_heap->name;
+    heap_stats->size = used_heap->end - used_heap->start;
+    heap_stats->caps = caps;
+    heap_stats->current_usage = size;
+    heap_stats->peak_usage = size;
+    heap_stats->alloc_count = 1;
 
-    task_stats->task_stat.heap_count += 1;
+    task_stats->heap_count += 1;
     STAILQ_INSERT_TAIL(&task_stats->heaps_stats, heap_stats, next_heap_stat);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -212,7 +233,7 @@ static HEAP_IRAM_ATTR void create_new_subtask_stats_entry(const char * subtask_n
     subtask_stats->subtask_stat.current_usage = size;
     subtask_stats->subtask_stat.peak_usage = size;
 
-    task_stats->task_stat.subtask_count += 1;
+    task_stats->subtask_count += 1;
     STAILQ_INSERT_TAIL(&task_stats->subtasks_stats, subtask_stats, next_subtask_stat);
 }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
@@ -233,33 +254,29 @@ static HEAP_IRAM_ATTR task_info_t * create_new_task_stats_entry(TaskHandle_t tas
         return NULL;
     }
 
-    // create the heap stats for the new task entry
-    STAILQ_INIT(&task_info->heaps_stats);
-
-    task_info->task_stat.handle = task_handle;
-    task_info->task_stat.is_alive = true;
-    task_info->task_stat.overall_peak_usage = 0;
-    task_info->task_stat.overall_current_usage = 0;
+    task_info->handle = task_handle;
+#ifdef CONFIG_HEAP_TRACK_DELETED_TASKS
+    copy_task_name(task_info->name, sizeof task_info->name, task_handle);
+#endif // CONFIG_HEAP_TRACK_DELETED_TASKS
+    task_info->is_alive = true;
+    task_info->overall_peak_usage = 0;
+    task_info->overall_current_usage = 0;
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
-    task_info->task_stat.subtask_count = 0;
-    task_info->task_stat.subtask_stat = NULL;
+    task_info->subtask_count = 0;
     // create the subtask stats tailq for the new task entry
     STAILQ_INIT(&task_info->subtasks_stats);
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
-    task_info->task_stat.heap_count = 0;
-    task_info->task_stat.heap_stat = NULL; // this will be used to point at the user defined array of heap_stat
-    if (task_handle == 0x00) {
-        char task_name[] = "Pre-scheduler";
-        strcpy(task_info->task_stat.name, task_name);
-    } else {
-        strcpy(task_info->task_stat.name, pcTaskGetName(task_handle));
-    }
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+    task_info->heap_count = 0;
+    // create the heap stats for the new task entry
+    STAILQ_INIT(&task_info->heaps_stats);
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
 
     // Add the new / first task_info in the list (sorted by decreasing address).
     // The decreasing order is chosen because the task_handle 0x00000000 is used for pre-scheduler
     // operations and therefore need to appear last so it is not parsed when trying to find a suitable
     // task to update the stats from.
-    if (SLIST_EMPTY(&task_stats) || task_info->task_stat.handle >= SLIST_FIRST(&task_stats)->task_stat.handle) {
+    if (SLIST_EMPTY(&task_stats) || task_info->handle >= SLIST_FIRST(&task_stats)->handle) {
         // the list is empty, or the new task handler is at a higher address than the one from the first item
         SLIST_INSERT_HEAD(&task_stats, task_info, next_task_info);
     } else {
@@ -268,7 +285,7 @@ static HEAP_IRAM_ATTR task_info_t * create_new_task_stats_entry(TaskHandle_t tas
         task_info_t *cur_task_info = NULL;
         task_info_t *prev_task_info = NULL;
         SLIST_FOREACH(cur_task_info, &task_stats, next_task_info) {
-            if (cur_task_info->task_stat.handle < task_info->task_stat.handle) {
+            if (cur_task_info->handle < task_info->handle) {
                 SLIST_INSERT_AFTER(prev_task_info, task_info, next_task_info);
                 break;
             } else {
@@ -296,7 +313,7 @@ static HEAP_IRAM_ATTR task_info_t * find_or_create_new_task_stats_entry(void * b
     // the allocating task must be alive
     task_info_t * task_info = NULL;
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if (task_info->task_stat.handle == task_handle && task_info->task_stat.is_alive) {
+        if (task_info->handle == task_handle && task_info->is_alive) {
             break;
         }
     }
@@ -371,14 +388,14 @@ static HEAP_IRAM_ATTR void delete_task_info_entry(task_info_t *task_info)
         /* remove all entries from heap_stats->allocs_stats */
         alloc_stats_t *alloc_stat = NULL;
         while ((alloc_stat = STAILQ_FIRST( &prev_heap_stat->allocs_stats)) != NULL) {
-            current_heap_stat->heap_stat.alloc_count--;
+            current_heap_stat->alloc_count--;
             unlink_alloc_entry(prev_heap_stat, alloc_stat);
             alloc_stat->task_info = NULL; // avoid task linking to a dangling pointer
         }
         if (!STAILQ_EMPTY(&prev_heap_stat->allocs_stats)) continue;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
-        task_info->task_stat.heap_count--;
+        task_info->heap_count--;
         STAILQ_REMOVE(&task_info->heaps_stats, prev_heap_stat, heap_stats, next_heap_stat);
         containing_heap = find_containing_heap(prev_heap_stat);
         // prev_heap_stat must be allocated somewhere
@@ -397,7 +414,7 @@ static HEAP_IRAM_ATTR void delete_task_info_entry(task_info_t *task_info)
         prev_subtask_stat = current_subtask_stat;
         current_subtask_stat = STAILQ_NEXT(current_subtask_stat, next_subtask_stat);
 
-        task_info->task_stat.subtask_count--;
+        task_info->subtask_count--;
         STAILQ_REMOVE(&task_info->subtasks_stats, prev_subtask_stat, subtask_stats, next_subtask_stat);
         containing_heap = find_containing_heap(prev_subtask_stat);
         // prev_subtask_stat must be allocated somewhere
@@ -439,9 +456,9 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_alloc(heap_t *heap, void *ptr
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
     if (task_info != NULL) {
-        task_info->task_stat.overall_current_usage += size;
-        if (task_info->task_stat.overall_current_usage > task_info->task_stat.overall_peak_usage) {
-            task_info->task_stat.overall_peak_usage = task_info->task_stat.overall_current_usage;
+        task_info->overall_current_usage += size;
+        if (task_info->overall_current_usage > task_info->overall_peak_usage) {
+            task_info->overall_peak_usage = task_info->overall_current_usage;
         }
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
@@ -452,10 +469,10 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_alloc(heap_t *heap, void *ptr
             if (heap_stats->heap == heap->heap) {
                 heap_found = true;
 
-                heap_stats->heap_stat.current_usage += size;
-                heap_stats->heap_stat.alloc_count++;
-                if (heap_stats->heap_stat.current_usage > heap_stats->heap_stat.peak_usage) {
-                    heap_stats->heap_stat.peak_usage = heap_stats->heap_stat.current_usage;
+                heap_stats->current_usage += size;
+                heap_stats->alloc_count++;
+                if (heap_stats->current_usage > heap_stats->peak_usage) {
+                    heap_stats->peak_usage = heap_stats->current_usage;
                 }
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -535,8 +552,8 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
                 if (allocation_found) {
-                    heap_stats->heap_stat.current_usage -= old_size;
-                    heap_stats->heap_stat.alloc_count--;
+                    heap_stats->current_usage -= old_size;
+                    heap_stats->alloc_count--;
                 }
 
                 break;
@@ -558,7 +575,7 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
         if (allocation_found) {
-            old_task_info->task_stat.overall_current_usage -= old_size;
+            old_task_info->overall_current_usage -= old_size;
         }
     }
 
@@ -569,9 +586,9 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
     if (new_task_info != NULL) {
-        new_task_info->task_stat.overall_current_usage += new_size;
-        if (new_task_info->task_stat.overall_current_usage > new_task_info->task_stat.overall_peak_usage) {
-            new_task_info->task_stat.overall_peak_usage = new_task_info->task_stat.overall_current_usage;
+        new_task_info->overall_current_usage += new_size;
+        if (new_task_info->overall_current_usage > new_task_info->overall_peak_usage) {
+            new_task_info->overall_peak_usage = new_task_info->overall_current_usage;
         }
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
@@ -581,10 +598,10 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
             if (heap_stats->heap == heap->heap) {
                 heap_found = true;
 
-                heap_stats->heap_stat.current_usage  += new_size;
-                heap_stats->heap_stat.alloc_count++;
-                if (heap_stats->heap_stat.current_usage > heap_stats->heap_stat.peak_usage) {
-                    heap_stats->heap_stat.peak_usage = heap_stats->heap_stat.current_usage;
+                heap_stats->current_usage  += new_size;
+                heap_stats->alloc_count++;
+                if (heap_stats->current_usage > heap_stats->peak_usage) {
+                    heap_stats->peak_usage = heap_stats->current_usage;
                 }
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -622,7 +639,7 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
 #if  !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
-        if (!old_task_info->task_stat.is_alive && old_task_info->task_stat.overall_current_usage == 0) {
+        if (!old_task_info->is_alive && old_task_info->overall_current_usage == 0) {
             delete_task_info_entry(old_task_info);
         }
 #endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
@@ -664,8 +681,8 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
                 if (allocation_found) {
-                    heap_stats->heap_stat.current_usage -= size;
-                    heap_stats->heap_stat.alloc_count--;
+                    heap_stats->current_usage -= size;
+                    heap_stats->alloc_count--;
                 }
 
                 break;
@@ -687,7 +704,7 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
         if (allocation_found) {
-            task_info->task_stat.overall_current_usage -= size;
+            task_info->overall_current_usage -= size;
         }
 
         // when a task is deleted, esp_caps_free is called to delete the TCB of the task from vTaskDelete.
@@ -695,22 +712,72 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
         // If one task_info contains the newly made TaskHandle from ptr it means that esp_caps_free
         // was indeed called from vTaskDelete. We can then update the task_stats by marking the corresponding
         // task as deleted.
-        if (task_info->task_stat.handle == ptr) {
+        if (task_info->handle == ptr) {
             // we found the task info from the task that is being deleted.
-            task_info->task_stat.is_alive = false;
+            task_info->is_alive = false;
 #if !CONFIG_HEAP_TRACK_DELETED_TASKS
             delete_task_info_entry(task_info);
 #endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
         }
 
 #if !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
-        if (!task_info->task_stat.is_alive && task_info->task_stat.overall_current_usage == 0) {
+        if (!task_info->is_alive && task_info->overall_current_usage == 0) {
             delete_task_info_entry(task_info);
         }
 #endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
     }
 
     xSemaphoreGive(s_task_tracking_mutex);
+}
+
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
+static heap_task_block_t capture_alloc_stats(task_info_t * task_info, heap_stats_t * heap_info, alloc_stats_t * alloc_stats) {
+    return (heap_task_block_t) {
+        .task = task_info->handle,
+        .address = MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET(alloc_stats),
+        .size = multi_heap_get_full_block_size(heap_info->heap, alloc_stats),
+    };
+}
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
+
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+static heap_stat_t capture_heap_stats(heap_stats_t * heap_info) {
+    return (heap_stat_t) {
+        .name = heap_info->name,
+        .caps = heap_info->caps,
+        .size = heap_info->size,
+        .current_usage = heap_info->current_usage,
+        .peak_usage = heap_info->peak_usage,
+        .alloc_count = heap_info->alloc_count,
+        .alloc_stat = NULL,
+    };
+}
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+
+static task_stat_t capture_task_stats(task_info_t * task_info) {
+    task_stat_t stat = {
+        .handle = task_info->handle,
+        .is_alive = task_info->is_alive,
+        .overall_peak_usage = task_info->overall_peak_usage,
+        .overall_current_usage = task_info->overall_current_usage,
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+        .subtask_count = task_info->subtask_count,
+        .subtask_stat = NULL,
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+        .heap_count = task_info->heap_count,
+        .heap_stat = NULL,
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+    };
+
+#ifdef CONFIG_HEAP_TRACK_DELETED_TASKS
+    memcpy(stat.name, task_info->name, sizeof stat.name);
+    _Static_assert(sizeof stat.name == sizeof task_info->name, "task name buffer sizes must match");
+#else // !CONFIG_HEAP_TRACK_DELETED_TASKS
+    copy_task_name(task_info->name, sizeof task_info->name, task_handle);
+#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
+
+    return stat;
 }
 
 esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
@@ -741,20 +808,22 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
         if (task_index >= tasks_stat->task_count) {
             break;
         }
-        memcpy(tasks_stat->stat_arr + task_index, &task_info->task_stat, sizeof(task_stat_t));
+
         task_stat_t *current_task_stat = tasks_stat->stat_arr + task_index;
         task_index++;
+
+        *current_task_stat = capture_task_stats(task_info);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
         // If no more heap stat entries in the array are available, just proceed
         // with filling task stats but skip filling info on heap stat and alloc stat.
-        if (heap_index + task_info->task_stat.heap_count > tasks_stat->heap_count) {
+        if (heap_index + task_info->heap_count > tasks_stat->heap_count) {
             current_task_stat->heap_stat = NULL;
         } else {
             // set the pointer where the heap info for the given task will
             // be in the user array
             current_task_stat->heap_stat = tasks_stat->heap_stat_start + heap_index;
-            heap_index += task_info->task_stat.heap_count;
+            heap_index += task_info->heap_count;
 
             // copy the stats of the different heaps the task has used and the different allocs
             // allocated in those heaps. If the number of entries remaining for alloc stats is
@@ -762,36 +831,35 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
             // be copied at all.
             size_t h_index = 0;
             heap_stats_t *heap_info = STAILQ_FIRST(&task_info->heaps_stats);
-            while(h_index < task_info->task_stat.heap_count && heap_info != NULL) {
+            while(h_index < task_info->heap_count && heap_info != NULL) {
+
+                heap_stat_t *current_heap_stat = current_task_stat->heap_stat + h_index;
+                h_index++;
+
+                *current_heap_stat = capture_heap_stats(heap_info);
+
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
                 // increase alloc_index before filling the alloc info of the given heap
                 // to avoid running out of alloc stat entry while doing it.
-                if (alloc_index + heap_info->heap_stat.alloc_count > tasks_stat->alloc_count) {
-                    heap_info->heap_stat.alloc_stat = NULL;
+                if (alloc_index + heap_info->alloc_count > tasks_stat->alloc_count) {
+                    current_heap_stat->alloc_stat = NULL;
                 } else {
                     // set the pointer where the alloc info for the given heap will
                     // be in the user array
-                    heap_info->heap_stat.alloc_stat = tasks_stat->alloc_stat_start + alloc_index;
+                    current_heap_stat->alloc_stat = tasks_stat->alloc_stat_start + alloc_index;
                     // fill the alloc array in heap_info by running through all blocks of a given heap
                     // and storing info about the blocks allocated by the given task
                     alloc_stats_t *alloc_stats = NULL;
                     size_t a_index = 0;
                     STAILQ_FOREACH(alloc_stats, &heap_info->allocs_stats, next_alloc) {
-                        heap_task_block_t alloc = {
-                            .task = task_info->task_stat.handle,
-                            .address = MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET(alloc_stats),
-                            .size = multi_heap_get_full_block_size(heap_info->heap, alloc_stats),
-                        };
-                        heap_info->heap_stat.alloc_stat[a_index] = alloc;
+                        current_heap_stat->alloc_stat[a_index] = capture_alloc_stats(task_info, heap_info, alloc_stats);
                         a_index++;
                     }
 
-                    alloc_index += heap_info->heap_stat.alloc_count;
+                    alloc_index += heap_info->alloc_count;
                 }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
-                memcpy(current_task_stat->heap_stat + h_index, &heap_info->heap_stat, sizeof(heap_stat_t));
-                h_index++;
                 heap_info = STAILQ_NEXT(heap_info, next_heap_stat);
             }
         }
@@ -800,9 +868,9 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
         // If no more subtask stat entries in the array are available, just proceed
         // with filling task stats but skip filling info on subtask stat and alloc stat.
-        if (subtask_index + task_info->task_stat.subtask_count > tasks_stat->subtask_count) {
+        if (subtask_index + task_info->subtask_count > tasks_stat->subtask_count) {
             current_task_stat->subtask_stat = NULL;
-        } else if (task_info->task_stat.subtask_count == 1 && STAILQ_FIRST(&task_info->subtasks_stats)->subtask_stat.name == NULL) {
+        } else if (task_info->subtask_count == 1 && STAILQ_FIRST(&task_info->subtasks_stats)->subtask_stat.name == NULL) {
             // skip if only the trivial (null) subtask exists to avoid wasting subtask_stat entries
             current_task_stat->subtask_count = 0;
             current_task_stat->subtask_stat = NULL;
@@ -810,12 +878,12 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
             // set the pointer where the subtask info for the given task will
             // be in the user array
             current_task_stat->subtask_stat = tasks_stat->subtask_stat_start + subtask_index;
-            subtask_index += task_info->task_stat.subtask_count;
+            subtask_index += task_info->subtask_count;
 
             // copy the stats of the different subtasks the task has used.
             size_t h_index = 0;
             subtask_stats_t *subtask_info = STAILQ_FIRST(&task_info->subtasks_stats);
-            while(h_index < task_info->task_stat.subtask_count && subtask_info != NULL) {
+            while(h_index < task_info->subtask_count && subtask_info != NULL) {
                 memcpy(current_task_stat->subtask_stat + h_index, &subtask_info->subtask_stat, sizeof(subtask_stat_t));
                 h_index++;
                 subtask_info = STAILQ_NEXT(subtask_info, next_subtask_stat);
@@ -859,9 +927,9 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if(task_info->task_stat.handle == task_handle) {
+        if(task_info->handle == task_handle) {
             // copy the task_stat of the task itself
-            memcpy(&task_stat->stat, &task_info->task_stat, sizeof(task_stat_t));
+            task_stat->stat = capture_task_stats(task_info);
             break;
         }
     }
@@ -884,43 +952,41 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     heap_stats_t *heap_info = STAILQ_FIRST(&task_info->heaps_stats);
-    while(heap_index < task_info->task_stat.heap_count || heap_info != NULL) {
+    while(heap_index < task_info->heap_count || heap_info != NULL) {
         // check that there is enough heap_stat entry left to add another one to the user defined
         // array of heap_stat
         if (heap_index >= task_stat->heap_count) {
             break;
         }
 
+        heap_stat_t *current_heap_stat = task_stat->stat.heap_stat + heap_index;
+        heap_index++;
+
+        *current_heap_stat = capture_heap_stats(heap_info);
+
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
         // increase alloc_index before filling the block info of the given heap
         // to avoid running out of block stat entry while doing it.
-        if (alloc_index + heap_info->heap_stat.alloc_count > task_stat->alloc_count) {
-            heap_info->heap_stat.alloc_stat = NULL;
+        if (alloc_index + heap_info->alloc_count > task_stat->alloc_count) {
+            current_heap_stat->alloc_stat = NULL;
         } else {
             // set the pointer where the block info for the given heap will
             // be in the user array
-            heap_info->heap_stat.alloc_stat = task_stat->alloc_stat_start + alloc_index;
+            current_heap_stat->alloc_stat = task_stat->alloc_stat_start + alloc_index;
 
             // fill the alloc array in heap_info by running through all blocks of a given heap
             // and storing info about the blocks allocated by the given task
             alloc_stats_t *alloc_stats = NULL;
             size_t a_index = 0;
             STAILQ_FOREACH(alloc_stats, &heap_info->allocs_stats, next_alloc) {
-                heap_task_block_t alloc = {
-                    .task = task_info->task_stat.handle,
-                    .address = MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET(alloc_stats),
-                    .size = multi_heap_get_full_block_size(heap_info->heap, alloc_stats),
-                };
-                heap_info->heap_stat.alloc_stat[a_index] = alloc;
+                current_heap_stat->alloc_stat[a_index] = capture_alloc_stats(task_info, heap_info, alloc_stats);
                 a_index++;
             }
 
-            alloc_index += heap_info->heap_stat.alloc_count;
+            alloc_index += heap_info->alloc_count;
         }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 
-        memcpy(task_stat->stat.heap_stat + heap_index, &heap_info->heap_stat, sizeof(heap_stat_t));
-        heap_index++;
         heap_info = STAILQ_NEXT(heap_info, next_heap_stat);
     }
     xSemaphoreGive(s_task_tracking_mutex);
@@ -938,7 +1004,7 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     subtask_stats_t *subtask_info = STAILQ_FIRST(&task_info->subtasks_stats);
-    while(subtask_index < task_info->task_stat.subtask_count || subtask_info != NULL) {
+    while(subtask_index < task_info->subtask_count || subtask_info != NULL) {
         // check that there is enough subtask_stat entry left to add another one to the user defined
         // array of subtask_stat
         if (subtask_index >= task_stat->subtask_count) {
@@ -968,38 +1034,36 @@ static void heap_caps_print_task_info(FILE *stream, task_info_t *task_info, bool
 
     const char *task_info_visual = is_last_task_info ? " " : "│";
     const char *task_info_visual_start = is_last_task_info ? "└" : "├";
+    task_stat_t task_stat = capture_task_stats(task_info);
     fprintf(stream, "%s %s: %s, CURRENT MEMORY USAGE %d, PEAK MEMORY USAGE %d, TOTAL HEAP USED %d:\n", task_info_visual_start,
-                                                                                                      task_info->task_stat.is_alive ? "ALIVE" : "DELETED",
-                                                                                                      task_info->task_stat.name,
-                                                                                                      task_info->task_stat.overall_current_usage,
-                                                                                                      task_info->task_stat.overall_peak_usage,
-                                                                                                      task_info->task_stat.heap_count);
+                                                                                                      task_stat.is_alive ? "ALIVE" : "DELETED",
+                                                                                                      task_stat.name,
+                                                                                                      task_stat.overall_current_usage,
+                                                                                                      task_stat.overall_peak_usage,
+                                                                                                      task_stat.heap_count);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
     heap_stats_t *heap_info = NULL;
     STAILQ_FOREACH(heap_info, &task_info->heaps_stats, next_heap_stat) {
-        char *next_heap_visual = !STAILQ_NEXT(heap_info, next_heap_stat) ? " " : "│";
-        char *next_heap_visual_start = !STAILQ_NEXT(heap_info, next_heap_stat) ? "└" : "├";
+        const char *next_heap_visual = !STAILQ_NEXT(heap_info, next_heap_stat) ? " " : "│";
+        const char *next_heap_visual_start = !STAILQ_NEXT(heap_info, next_heap_stat) ? "└" : "├";
+        heap_stat_t heap_stat = capture_heap_stats(heap_info);
         fprintf(stream, "%s    %s HEAP: %s, CAPS: 0x%08lx, SIZE: %d, USAGE: CURRENT %d (%d%%), PEAK %d (%d%%), ALLOC COUNT: %d\n",
                 task_info_visual,
                 next_heap_visual_start,
-                heap_info->heap_stat.name,
-                heap_info->heap_stat.caps,
-                heap_info->heap_stat.size,
-                heap_info->heap_stat.current_usage,
-                (heap_info->heap_stat.current_usage * 100) / heap_info->heap_stat.size,
-                heap_info->heap_stat.peak_usage,
-                (heap_info->heap_stat.peak_usage * 100) / heap_info->heap_stat.size,
-                heap_info->heap_stat.alloc_count);
+                heap_stat.name,
+                heap_stat.caps,
+                heap_stat.size,
+                heap_stat.current_usage,
+                (heap_stat.current_usage * 100) / heap_stat.size,
+                heap_stat.peak_usage,
+                (heap_stat.peak_usage * 100) / heap_stat.size,
+                heap_stat.alloc_count);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
         alloc_stats_t *alloc_stats = NULL;
         STAILQ_FOREACH(alloc_stats, &heap_info->allocs_stats, next_alloc) {
-            heap_task_block_t alloc = {
-                .task = task_info->task_stat.handle,
-                .address = MULTI_HEAP_ADD_BLOCK_OWNER_OFFSET(alloc_stats),
-                .size = multi_heap_get_full_block_size(heap_info->heap, alloc_stats),
-            };
+            heap_task_block_t alloc = capture_alloc_stats(task_info, heap_info, alloc_stats);
             fprintf(stream, "%s    %s    ├ ALLOC %p, SIZE %" PRIu32 "\n", task_info_visual,
                                                                 next_heap_visual,
                                                                 alloc.address,
@@ -1022,7 +1086,7 @@ static void heap_caps_print_task_overview(FILE *stream, task_info_t *task_info, 
         fprintf(stream, "├────────────────────┼─────────┼──────────────────────┼───────────────────┼─────────────────┤\n");
     }
 
-    task_stat_t task_stat = task_info->task_stat;
+    task_stat_t task_stat = capture_task_stats(task_info);
     fprintf(stream, "│ %18s │ %7s │ %20d │ %17d │ %15d │\n",
                     task_stat.name,
                     task_stat.is_alive ? "ALIVE  " : "DELETED",
@@ -1045,7 +1109,7 @@ void heap_caps_print_single_task_stat(FILE *stream, TaskHandle_t task_handle)
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if (task_info->task_stat.handle == task_handle) {
+        if (task_info->handle == task_handle) {
             heap_caps_print_task_info(stream, task_info, true);
 
             xSemaphoreGive(s_task_tracking_mutex);
@@ -1077,7 +1141,7 @@ void heap_caps_print_single_task_stat_overview(FILE *stream, TaskHandle_t task_h
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if (task_info->task_stat.handle == task_handle) {
+        if (task_info->handle == task_handle) {
             heap_caps_print_task_overview(stream, task_info, true, true);
 
             xSemaphoreGive(s_task_tracking_mutex);
@@ -1117,11 +1181,11 @@ esp_err_t heap_caps_alloc_single_task_stat_arrays(heap_single_task_stat_t *task_
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if(task_info->task_stat.handle == task_handle && task_info->task_stat.is_alive) {
-            task_stat->heap_count = task_info->task_stat.heap_count;
+        if(task_info->handle == task_handle && task_info->is_alive) {
+            task_stat->heap_count = task_info->heap_count;
             heap_stats_t *heap_info = NULL;
             STAILQ_FOREACH(heap_info, &task_info->heaps_stats, next_heap_stat) {
-                task_stat->alloc_count += heap_info->heap_stat.alloc_count;
+                task_stat->alloc_count += heap_info->alloc_count;
             }
             break;
         }
@@ -1182,10 +1246,10 @@ esp_err_t heap_caps_alloc_all_task_stat_arrays(heap_all_tasks_stat_t *tasks_stat
     SLIST_FOREACH(task_info, &task_stats, next_task_info) {
         tasks_stat->task_count += 1;
 
-        tasks_stat->heap_count += task_info->task_stat.heap_count;
+        tasks_stat->heap_count += task_info->heap_count;
         heap_stats_t *heap_info = NULL;
         STAILQ_FOREACH(heap_info, &task_info->heaps_stats, next_heap_stat) {
-            tasks_stat->alloc_count += heap_info->heap_stat.alloc_count;
+            tasks_stat->alloc_count += heap_info->alloc_count;
         }
     }
     xSemaphoreGive(s_task_tracking_mutex);
@@ -1301,7 +1365,7 @@ size_t heap_caps_get_per_task_info(heap_task_info_params_t *params)
             xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
             task_info_t * task_info = find_task_stats_entry_for_block(bowner);
             xSemaphoreGive(s_task_tracking_mutex);
-            TaskHandle_t btask = task_info != NULL && task_info->task_stat.is_alive ? task_info->task_stat.handle : NULL;
+            TaskHandle_t btask = task_info != NULL && task_info->is_alive ? task_info->handle : NULL;
 
             // Accumulate per-task allocation totals.
             if (params->totals) {
