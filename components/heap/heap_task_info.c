@@ -51,7 +51,9 @@ typedef struct heap_stats {
  * by a given subtask.
  */
 typedef struct subtask_stats {
-    subtask_stat_t subtask_stat;
+    const char * name;
+    size_t peak_usage;
+    size_t current_usage;
     STAILQ_ENTRY(subtask_stats) next_subtask_stat;
 } subtask_stats_t;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
@@ -229,9 +231,9 @@ static HEAP_IRAM_ATTR void create_new_subtask_stats_entry(const char * subtask_n
         return;
     }
 
-    subtask_stats->subtask_stat.name = subtask_name;
-    subtask_stats->subtask_stat.current_usage = size;
-    subtask_stats->subtask_stat.peak_usage = size;
+    subtask_stats->name = subtask_name;
+    subtask_stats->current_usage = size;
+    subtask_stats->peak_usage = size;
 
     task_stats->subtask_count += 1;
     STAILQ_INSERT_TAIL(&task_stats->subtasks_stats, subtask_stats, next_subtask_stat);
@@ -494,10 +496,10 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_alloc(heap_t *heap, void *ptr
         subtask_stats_t *subtask_stats = NULL;
         /* find the subtask in the list and update the overall stats */
         STAILQ_FOREACH(subtask_stats, &task_info->subtasks_stats, next_subtask_stat) {
-            if (subtask_stats->subtask_stat.name == block_owner.subtask) {
-                subtask_stats->subtask_stat.current_usage += size;
-                if (subtask_stats->subtask_stat.current_usage > subtask_stats->subtask_stat.peak_usage) {
-                    subtask_stats->subtask_stat.peak_usage = subtask_stats->subtask_stat.current_usage;
+            if (subtask_stats->name == block_owner.subtask) {
+                subtask_stats->current_usage += size;
+                if (subtask_stats->current_usage > subtask_stats->peak_usage) {
+                    subtask_stats->peak_usage = subtask_stats->current_usage;
                 }
 
                 subtask_found = true;
@@ -564,9 +566,9 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
         subtask_stats_t *subtask_stats = NULL;
         STAILQ_FOREACH(subtask_stats, &old_task_info->subtasks_stats, next_subtask_stat) {
-            if (subtask_stats->subtask_stat.name == old_block_owner.subtask) {
+            if (subtask_stats->name == old_block_owner.subtask) {
                 if (allocation_found) {
-                    subtask_stats->subtask_stat.current_usage -= old_size;
+                    subtask_stats->current_usage -= old_size;
                 }
 
                 break;
@@ -622,10 +624,10 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
         subtask_stats_t *subtask_stats = NULL;
         /* find the subtask in the list and update the overall stats */
         STAILQ_FOREACH(subtask_stats, &new_task_info->subtasks_stats, next_subtask_stat) {
-            if (subtask_stats->subtask_stat.name == new_block_owner.subtask) {
-                subtask_stats->subtask_stat.current_usage += new_size;
-                if (subtask_stats->subtask_stat.current_usage > subtask_stats->subtask_stat.peak_usage) {
-                    subtask_stats->subtask_stat.peak_usage = subtask_stats->subtask_stat.current_usage;
+            if (subtask_stats->name == new_block_owner.subtask) {
+                subtask_stats->current_usage += new_size;
+                if (subtask_stats->current_usage > subtask_stats->peak_usage) {
+                    subtask_stats->peak_usage = subtask_stats->current_usage;
                 }
 
                 subtask_found = true;
@@ -693,9 +695,9 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
         subtask_stats_t *subtask_stats = NULL;
         STAILQ_FOREACH(subtask_stats, &task_info->subtasks_stats, next_subtask_stat) {
-            if (subtask_stats->subtask_stat.name == block_owner.subtask) {
+            if (subtask_stats->name == block_owner.subtask) {
                 if (allocation_found) {
-                    subtask_stats->subtask_stat.current_usage -= size;
+                    subtask_stats->current_usage -= size;
                 }
 
                 break;
@@ -750,6 +752,16 @@ static heap_stat_t capture_heap_stats(heap_stats_t * heap_info) {
         .peak_usage = heap_info->peak_usage,
         .alloc_count = heap_info->alloc_count,
         .alloc_stat = NULL,
+    };
+}
+#endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
+
+#ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
+static subtask_stat_t capture_subtask_stats(subtask_stats_t * subtask_info) {
+    return (subtask_stat_t) {
+        .name = subtask_info->name,
+        .peak_usage = subtask_info->peak_usage,
+        .current_usage = subtask_info->current_usage,
     };
 }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
@@ -865,7 +877,7 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
         // with filling task stats but skip filling info on subtask stat and alloc stat.
         if (subtask_index + task_info->subtask_count > tasks_stat->subtask_count) {
             current_task_stat->subtask_stat = NULL;
-        } else if (task_info->subtask_count == 1 && STAILQ_FIRST(&task_info->subtasks_stats)->subtask_stat.name == NULL) {
+        } else if (task_info->subtask_count == 1 && STAILQ_FIRST(&task_info->subtasks_stats)->name == NULL) {
             // skip if only the trivial (null) subtask exists to avoid wasting subtask_stat entries
             current_task_stat->subtask_count = 0;
             current_task_stat->subtask_stat = NULL;
@@ -876,11 +888,10 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
             subtask_index += task_info->subtask_count;
 
             // copy the stats of the different subtasks the task has used.
-            size_t h_index = 0;
+            size_t s_index = 0;
             subtask_stats_t *subtask_info = STAILQ_FIRST(&task_info->subtasks_stats);
-            while(h_index < task_info->subtask_count && subtask_info != NULL) {
-                memcpy(current_task_stat->subtask_stat + h_index, &subtask_info->subtask_stat, sizeof(subtask_stat_t));
-                h_index++;
+            while(s_index < task_info->subtask_count && subtask_info != NULL) {
+                current_task_stat->subtask_stat[s_index++] = capture_subtask_stats(subtask_info);
                 subtask_info = STAILQ_NEXT(subtask_info, next_subtask_stat);
             }
         }
@@ -985,7 +996,7 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
-    task_stat->stat.heap_stat = task_stat->heap_stat_start;
+    task_stat->stat.subtask_stat = task_stat->subtask_stat_start;
 
     // copy the stats of the different heaps the task has used and the different blocks
     // allocated in those heaps. If the number of entries remaining for block stats is
@@ -996,16 +1007,22 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     subtask_stats_t *subtask_info = STAILQ_FIRST(&task_info->subtasks_stats);
-    while(subtask_index < task_info->subtask_count || subtask_info != NULL) {
-        // check that there is enough subtask_stat entry left to add another one to the user defined
-        // array of subtask_stat
-        if (subtask_index >= task_stat->subtask_count) {
-            break;
-        }
+    if (task_info->subtask_count == 1 && subtask_info->name == NULL) {
+        // skip if only the trivial (null) subtask exists to avoid wasting subtask_stat entries
+        task_stat->stat.subtask_count = 0;
+        task_stat->stat.subtask_stat = NULL;
+    } else {
+        // otherwise copy subtask stats
+        while (subtask_index < task_info->subtask_count && subtask_info != NULL) {
+            // check that there is enough subtask_stat entry left to add another one to the user defined
+            // array of subtask_stat
+            if (subtask_index >= task_stat->subtask_count) {
+                break;
+            }
 
-        memcpy(task_stat->stat.subtask_stat + subtask_index, &subtask_info->subtask_stat, sizeof(subtask_stat_t));
-        subtask_index++;
-        subtask_info = STAILQ_NEXT(subtask_info, next_subtask_stat);
+            task_stat->stat.subtask_stat[subtask_index++] = capture_subtask_stats(subtask_info);
+            subtask_info = STAILQ_NEXT(subtask_info, next_subtask_stat);
+        }
     }
     xSemaphoreGive(s_task_tracking_mutex);
 
