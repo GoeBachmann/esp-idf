@@ -22,7 +22,7 @@ typedef struct heap_caps_block_owner {
     const char * subtask;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
-    STAILQ_ENTRY(heap_caps_block_owner) next_alloc;
+    SLIST_ENTRY(heap_caps_block_owner) next_alloc;
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
 } heap_caps_block_owner_t;
 
