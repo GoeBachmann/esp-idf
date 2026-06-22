@@ -274,31 +274,7 @@ static HEAP_IRAM_ATTR task_info_t * create_new_task_stats_entry(TaskHandle_t tas
     SLIST_INIT(&task_info->heaps_stats);
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_HEAP
 
-    // Add the new / first task_info in the list (sorted by decreasing address).
-    // The decreasing order is chosen because the task_handle 0x00000000 is used for pre-scheduler
-    // operations and therefore need to appear last so it is not parsed when trying to find a suitable
-    // task to update the stats from.
-    if (SLIST_EMPTY(&task_stats) || task_info->handle >= SLIST_FIRST(&task_stats)->handle) {
-        // the list is empty, or the new task handler is at a higher address than the one from the first item
-        SLIST_INSERT_HEAD(&task_stats, task_info, next_task_info);
-    } else {
-        // the new task handle is at a lower address than the first item in the list, go through the list to
-        // properly insert the new item
-        task_info_t *cur_task_info = NULL;
-        task_info_t *prev_task_info = NULL;
-        SLIST_FOREACH(cur_task_info, &task_stats, next_task_info) {
-            if (cur_task_info->handle < task_info->handle) {
-                SLIST_INSERT_AFTER(prev_task_info, task_info, next_task_info);
-                break;
-            } else {
-                prev_task_info = cur_task_info;
-            }
-        }
-        // here should be a last case handling: new task info as a task handle address smaller than all existing
-        // items in the list. But this is case is impossible given that the pre-scheduler allocations always
-        // happen first and the task handle defaults to 0x00000000 for the pre-scheduler so it will always be
-        // last in the list.
-    }
+    SLIST_INSERT_HEAD(&task_stats, task_info, next_task_info);
 
     return task_info;
 }
