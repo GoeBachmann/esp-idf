@@ -785,9 +785,7 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
             break;
         }
 
-        task_stat_t *current_task_stat = tasks_stat->stat_arr + task_index;
-        task_index++;
-
+        task_stat_t *current_task_stat = &tasks_stat->stat_arr[task_index++];
         *current_task_stat = capture_task_stats(task_info);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_HEAP
@@ -809,9 +807,7 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
             heap_stats_t *heap_info = STAILQ_FIRST(&task_info->heaps_stats);
             while(h_index < task_info->heap_count && heap_info != NULL) {
 
-                heap_stat_t *current_heap_stat = current_task_stat->heap_stat + h_index;
-                h_index++;
-
+                heap_stat_t *current_heap_stat = &current_task_stat->heap_stat[h_index++];
                 *current_heap_stat = capture_heap_stats(heap_info);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -828,8 +824,7 @@ esp_err_t heap_caps_get_all_task_stat(heap_all_tasks_stat_t *tasks_stat)
                     alloc_stats_t *alloc_stats = NULL;
                     size_t a_index = 0;
                     STAILQ_FOREACH(alloc_stats, &heap_info->allocs_stats, next_alloc) {
-                        current_heap_stat->alloc_stat[a_index] = capture_alloc_stats(task_info, heap_info, alloc_stats);
-                        a_index++;
+                        current_heap_stat->alloc_stat[a_index++] = capture_alloc_stats(task_info, heap_info, alloc_stats);
                     }
 
                     alloc_index += heap_info->alloc_count;
@@ -928,16 +923,14 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
 
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
     heap_stats_t *heap_info = STAILQ_FIRST(&task_info->heaps_stats);
-    while(heap_index < task_info->heap_count || heap_info != NULL) {
+    while(heap_index < task_info->heap_count && heap_info != NULL) {
         // check that there is enough heap_stat entry left to add another one to the user defined
         // array of heap_stat
         if (heap_index >= task_stat->heap_count) {
             break;
         }
 
-        heap_stat_t *current_heap_stat = task_stat->stat.heap_stat + heap_index;
-        heap_index++;
-
+        heap_stat_t *current_heap_stat = &task_stat->stat.heap_stat[heap_index++];
         *current_heap_stat = capture_heap_stats(heap_info);
 
 #ifdef CONFIG_HEAP_TASK_TRACKING_PER_ALLOCATION
@@ -955,8 +948,7 @@ esp_err_t heap_caps_get_single_task_stat(heap_single_task_stat_t *task_stat, Tas
             alloc_stats_t *alloc_stats = NULL;
             size_t a_index = 0;
             STAILQ_FOREACH(alloc_stats, &heap_info->allocs_stats, next_alloc) {
-                current_heap_stat->alloc_stat[a_index] = capture_alloc_stats(task_info, heap_info, alloc_stats);
-                a_index++;
+                current_heap_stat->alloc_stat[a_index++] = capture_alloc_stats(task_info, heap_info, alloc_stats);
             }
 
             alloc_index += heap_info->alloc_count;
