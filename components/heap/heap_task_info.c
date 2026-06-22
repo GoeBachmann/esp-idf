@@ -280,6 +280,25 @@ static HEAP_IRAM_ATTR task_info_t * create_new_task_stats_entry(TaskHandle_t tas
 }
 
 /**
+ * @brief Find task info entry for a running task by handle.
+ *
+ * @param task_handle The task handle of the searched for task
+ */
+static HEAP_IRAM_ATTR task_info_t * find_task_stats_entry_for_handle(TaskHandle_t task_handle)
+{
+    // try to find the current block's task stats entry by handle
+    // the task must be alive
+    task_info_t * task_info = NULL;
+    SLIST_FOREACH(task_info, &task_stats, next_task_info) {
+        if (task_info->handle == task_handle && task_info->is_alive) {
+            return task_info;
+        }
+    }
+
+    return NULL;
+}
+
+/**
  * @brief Find or create a new task info entry in task_stats.
  *
  * @param block_owner_ptr The block owner ptr for the currently allocated block
@@ -287,14 +306,7 @@ static HEAP_IRAM_ATTR task_info_t * create_new_task_stats_entry(TaskHandle_t tas
  */
 static HEAP_IRAM_ATTR task_info_t * find_or_create_new_task_stats_entry(void * block_owner_ptr, TaskHandle_t task_handle)
 {
-    // try to find the current block's task stats entry by handle
-    // the allocating task must be alive
-    task_info_t * task_info = NULL;
-    SLIST_FOREACH(task_info, &task_stats, next_task_info) {
-        if (task_info->handle == task_handle && task_info->is_alive) {
-            break;
-        }
-    }
+    task_info_t * task_info = find_task_stats_entry_for_handle(task_handle);
 
     // if not found, create a new task stats entry
     if (task_info == NULL) {
@@ -555,6 +567,12 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
         if (allocation_found) {
             old_task_info->overall_current_usage -= old_size;
         }
+
+#if !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+        if (!old_task_info->is_alive && old_task_info->overall_current_usage == 0) {
+            delete_task_info_entry(old_task_info);
+        }
+#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
     }
 
     void *new_block_owner_ptr = MULTI_HEAP_REMOVE_BLOCK_OWNER_OFFSET(new_ptr);
@@ -616,11 +634,11 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
         }
 #endif // CONFIG_HEAP_TASK_TRACKING_PER_USER_SUBTASK
 
-#if  !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+#if CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
         if (!old_task_info->is_alive && old_task_info->overall_current_usage == 0) {
             delete_task_info_entry(old_task_info);
         }
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+#endif // CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
     }
 
     xSemaphoreGive(s_task_tracking_mutex);
@@ -629,6 +647,23 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_realloc(heap_t *heap, void *o
 HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
 {
     xSemaphoreTake(s_task_tracking_mutex, portMAX_DELAY);
+
+    // when a task is deleted, esp_caps_free is called to delete the TCB of the task from vTaskDelete.
+    // Try to make a TaskHandle out of ptr and compare it to the list of tasks in task_stats.
+    // If one task_info contains the newly made TaskHandle from ptr it means that esp_caps_free
+    // was indeed called from vTaskDelete. We can then update the task_stats by marking the corresponding
+    // task as deleted.
+    task_info_t * dying_task_info = find_task_stats_entry_for_handle((TaskHandle_t)ptr);
+    if (dying_task_info != NULL) {
+        dying_task_info->is_alive = false;
+#if !CONFIG_HEAP_TRACK_DELETED_TASKS
+        delete_task_info_entry(dying_task_info);
+#elif CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
+        if (dying_task_info->overall_current_usage == 0) {
+            delete_task_info_entry(dying_task_info);
+        }
+#endif // CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
+    }
 
     void *block_owner_ptr = MULTI_HEAP_REMOVE_BLOCK_OWNER_OFFSET(ptr);
     heap_caps_block_owner_t block_owner = MULTI_HEAP_GET_BLOCK_OWNER(block_owner_ptr);
@@ -685,24 +720,11 @@ HEAP_IRAM_ATTR void heap_caps_update_per_task_info_free(heap_t *heap, void *ptr)
             task_info->overall_current_usage -= size;
         }
 
-        // when a task is deleted, esp_caps_free is called to delete the TCB of the task from vTaskDelete.
-        // Try to make a TaskHandle out of ptr and compare it to the list of tasks in task_stats.
-        // If one task_info contains the newly made TaskHandle from ptr it means that esp_caps_free
-        // was indeed called from vTaskDelete. We can then update the task_stats by marking the corresponding
-        // task as deleted.
-        if (task_info->handle == ptr) {
-            // we found the task info from the task that is being deleted.
-            task_info->is_alive = false;
-#if !CONFIG_HEAP_TRACK_DELETED_TASKS
-            delete_task_info_entry(task_info);
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS
-        }
-
-#if !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+#if CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
         if (!task_info->is_alive && task_info->overall_current_usage == 0) {
             delete_task_info_entry(task_info);
         }
-#endif // !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS && CONFIG_HEAP_TRACK_DELETED_TASKS
+#endif // CONFIG_HEAP_TRACK_DELETED_TASKS && !CONFIG_HEAP_TRACK_DELETED_TASKS_WITHOUT_ALLOCATIONS
     }
 
     xSemaphoreGive(s_task_tracking_mutex);
